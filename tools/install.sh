@@ -75,6 +75,9 @@ man_help(){
     echo '        -m | --detect-modem'
     echo '                         Detect LTE/4G usb modem'
     echo ''
+    echo '        --install-tailscale'
+    echo '                         Install and configure Tailscale VPN'
+    echo ''
     echo '        -z | --zeroconf'
     echo '                         Install zeroconf/avahi service definition.'
     echo '                         It helps to detect the base station on the network.'
@@ -717,6 +720,57 @@ start_services() {
   echo '################################'
 }
 
+install_tailscale() {
+  echo '################################'
+  echo 'INSTALLING TAILSCALE VPN'
+  echo '################################'
+  # Check if Tailscale is already installed
+  if command -v tailscale >/dev/null 2>&1
+  then
+    echo 'Tailscale is already installed'
+    tailscale version
+    return 0
+  fi
+  
+  # Detect OS and install Tailscale accordingly
+  if [[ -f /etc/os-release ]]
+  then
+    . /etc/os-release
+    OS=$ID
+    OS_VERSION=$VERSION_ID
+  else
+    echo 'Cannot detect OS. Trying default installation method.'
+    OS='unknown'
+  fi
+  
+  case $OS in
+    debian|ubuntu|raspbian)
+      echo "Installing Tailscale for $OS..."
+      # Add Tailscale repository
+      curl -fsSL https://tailscale.com/install.sh | sh
+      ;;
+    *)
+      echo "Installing Tailscale using official install script..."
+      curl -fsSL https://tailscale.com/install.sh | sh
+      ;;
+  esac
+  
+  # Enable Tailscale service
+  if systemctl is-enabled --quiet tailscaled.service 2>/dev/null
+  then
+    echo 'Tailscale service is already enabled'
+  else
+    systemctl enable tailscaled.service 2>/dev/null || echo 'Warning: Could not enable tailscaled service'
+  fi
+  
+  echo ''
+  echo 'Tailscale installation completed!'
+  echo 'To connect this device to your Tailscale network, run:'
+  echo '  sudo tailscale up'
+  echo ''
+  echo 'Or visit: https://login.tailscale.com/admin/machines'
+}
+
 install_zeroconf_service() {
   echo '################################'
   echo 'INSTALLING ZEROCONF/AVAHI DEFINITION SERVICE'
@@ -772,11 +826,12 @@ main() {
   ARG_NO_WRITE_PORT=0
   ARG_CONFIGURE_GNSS=0
   ARG_DETECT_MODEM=0
+  ARG_INSTALL_TAILSCALE=0
   ARG_START_SERVICES=0
   ARG_ZEROCONF=0
   ARG_ALL=0
 
-  PARSED_ARGUMENTS=$(getopt --name install --options hu:drbi:jf:qtgencmsza: --longoptions help,user:,dependencies,rtklib,rtkbase-release,rtkbase-repo:,rtkbase-bundled,rtkbase-custom:,rtkbase-requirements,unit-files,gpsd-chrony,detect-gnss,no-write-port,configure-gnss,detect-modem,start-services,zeroconf,all: -- "$@")
+  PARSED_ARGUMENTS=$(getopt --name install --options hu:drbi:jf:qtgencmsza: --longoptions help,user:,dependencies,rtklib,rtkbase-release,rtkbase-repo:,rtkbase-bundled,rtkbase-custom:,rtkbase-requirements,unit-files,gpsd-chrony,detect-gnss,no-write-port,configure-gnss,detect-modem,install-tailscale,start-services,zeroconf,all: -- "$@")
   VALID_ARGUMENTS=$?
   if [ "$VALID_ARGUMENTS" != "0" ]; then
     #man_help
@@ -804,6 +859,7 @@ main() {
         -n | --no-write-port) ARG_NO_WRITE_PORT=1      ; shift   ;;
         -c | --configure-gnss) ARG_CONFIGURE_GNSS=1    ; shift   ;;
         -m | --detect-modem) ARG_DETECT_MODEM=1        ; shift   ;;
+        --install-tailscale) ARG_INSTALL_TAILSCALE=1    ; shift   ;;
         -s | --start-services) ARG_START_SERVICES=1    ; shift   ;;
         -z | --zeroconf) ARG_ZEROCONF=1                ; shift   ;;
         -a | --all) ARG_ALL="${2}"                     ; shift 2 ;;
@@ -867,6 +923,7 @@ main() {
   [ $ARG_DETECT_GNSS -eq 1 ] &&  { detect_gnss "${ARG_NO_WRITE_PORT}" ; ((cumulative_exit+=$?)) ;}
   [ $ARG_CONFIGURE_GNSS -eq 1 ] && { configure_gnss ; ((cumulative_exit+=$?)) ;}
   [ $ARG_DETECT_MODEM -eq 1 ] && { detect_usb_modem && _add_modem_port && _configure_modem ; ((cumulative_exit+=$?)) ;}
+  [ $ARG_INSTALL_TAILSCALE -eq 1 ] && { install_tailscale ; ((cumulative_exit+=$?)) ;}
   [ $ARG_ZEROCONF -eq 1 ] && { install_zeroconf_service; ((cumulative_exit+=$?)) ;}
   [ $ARG_START_SERVICES -eq 1 ] && { start_services ; ((cumulative_exit+=$?)) ;}
 }
