@@ -99,6 +99,9 @@ rtk = RTKLIB(socketio,
             log_path=app.config["DOWNLOAD_FOLDER"],
             )
 
+# Initialize network monitor with log path (after rtk is created to use the same log directory)
+network_monitor = NetworkMonitor(log_path=app.config["DOWNLOAD_FOLDER"])
+
 services_list = [{"service_unit" : "str2str_tcp.service", "name" : "main"},
                  {"service_unit" : "str2str_ntrip_A.service", "name" : "ntrip_A"},
                  {"service_unit" : "str2str_ntrip_B.service", "name" : "ntrip_B"},
@@ -115,6 +118,140 @@ services_list = [{"service_unit" : "str2str_tcp.service", "name" : "main"},
 #Delay before rtkrcv will stop if no user is on status.html page
 rtkcv_standby_delay = 600
 connected_clients = 0
+
+# Network connectivity monitoring
+class NetworkMonitor:
+    """Monitor network connectivity, latency, and disconnections"""
+    def __init__(self, log_path=None):
+        self.ping_hosts = ["8.8.8.8", "1.1.1.1"]  # Google DNS, Cloudflare DNS
+        self.latency_history = []
+        self.max_history = 100
+        self.disconnection_count = 0
+        self.last_connected = True
+        self.last_check_time = 0
+        self.last_log_time = 0
+        self.check_interval = 120  # Check every 120 seconds (2 minutes - minimal performance impact)
+        self.log_interval = 120  # Log every 120 seconds (same as check interval)
+        self.log_path = log_path if log_path else os.path.join(rtkbase_path, "data")
+        self.current_log_file = None
+        self.current_log_date = None
+        self._ensure_log_directory()
+        
+    def _ensure_log_directory(self):
+        """Ensure the log directory exists"""
+        try:
+            os.makedirs(self.log_path, exist_ok=True)
+        except OSError:
+            pass
+    
+    def _get_log_filename(self):
+        """Get the log filename for today"""
+        today = time.strftime("%Y-%m-%d")
+        return os.path.join(self.log_path, f"network_stats_{today}.log")
+    
+    def _write_log_entry(self, stats):
+        """Write a log entry to the daily log file"""
+        try:
+            log_file = self._get_log_filename()
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Check if file exists, if not write header
+            file_exists = os.path.exists(log_file)
+            
+            # Format: timestamp, connected, latency, latency_min, latency_max, disconnections
+            with open(log_file, 'a') as f:
+                if not file_exists:
+                    # Write CSV header
+                    f.write("timestamp,connected,latency_ms,latency_min_ms,latency_max_ms,disconnections\n")
+                
+                f.write(f"{timestamp},{stats['connected']},{stats['latency'] or 'N/A'},"
+                       f"{stats['latency_min'] or 'N/A'},{stats['latency_max'] or 'N/A'},"
+                       f"{stats['disconnections']}\n")
+        except (IOError, OSError) as e:
+            print(f"Error writing network stats log: {e}")
+    
+    def ping_host(self, host, timeout=2):
+        """Ping a host and return latency in ms, or None if failed"""
+        try:
+            # Use ping command (works on Linux)
+            result = subprocess.run(
+                ['ping', '-c', '1', '-W', str(timeout), host],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout + 1,
+                check=False
+            )
+            if result.returncode == 0:
+                # Parse latency from output: "time=12.345 ms"
+                output = result.stdout.decode('utf-8')
+                for line in output.split('\n'):
+                    if 'time=' in line:
+                        try:
+                            time_str = line.split('time=')[1].split()[0]
+                            return float(time_str)
+                        except (IndexError, ValueError):
+                            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            pass
+        return None
+    
+    def check_connectivity(self):
+        """Check connectivity and update statistics"""
+        current_time = time.time()
+        if current_time - self.last_check_time < self.check_interval:
+            return self.get_stats()
+        
+        self.last_check_time = current_time
+        
+        # Try to ping multiple hosts
+        latencies = []
+        for host in self.ping_hosts:
+            latency = self.ping_host(host)
+            if latency is not None:
+                latencies.append(latency)
+                break  # If one works, we're connected
+        
+        is_connected = len(latencies) > 0
+        
+        # Detect disconnection
+        if not is_connected and self.last_connected:
+            self.disconnection_count += 1
+        
+        self.last_connected = is_connected
+        
+        # Update latency history
+        if latencies:
+            avg_latency = sum(latencies) / len(latencies)
+            self.latency_history.append(avg_latency)
+            if len(self.latency_history) > self.max_history:
+                self.latency_history.pop(0)
+        
+        # Write to log periodically
+        stats = self.get_stats()
+        if current_time - self.last_log_time >= self.log_interval:
+            self._write_log_entry(stats)
+            self.last_log_time = current_time
+        
+        return stats
+    
+    def get_stats(self):
+        """Get current network statistics"""
+        if not self.latency_history:
+            return {
+                "connected": self.last_connected,
+                "latency": None,
+                "latency_min": None,
+                "latency_max": None,
+                "disconnections": self.disconnection_count
+            }
+        
+        return {
+            "connected": self.last_connected,
+            "latency": round(sum(self.latency_history[-10:]) / len(self.latency_history[-10:]), 1),  # Average of last 10
+            "latency_min": round(min(self.latency_history), 1),
+            "latency_max": round(max(self.latency_history), 1),
+            "disconnections": self.disconnection_count
+        }
 
 class StandaloneApplication(gunicorn.app.base.BaseApplication):
     def __init__(self, app, options=None):
@@ -190,6 +327,7 @@ def manager():
                 interfaces_infos = None
 
             volume_usage = get_volume_usage()
+            network_stats = network_monitor.check_connectivity()
             sys_infos = {"cpu_temp" : cpu_temp,
                         "max_cpu_temp" : max_cpu_temp,
                         "uptime" : get_uptime(),
@@ -197,7 +335,8 @@ def manager():
                         "volume_used" : round(volume_usage.used / 10E8, 2),
                         "volume_total" : round(volume_usage.total / 10E8, 2),
                         "volume_percent_used" : volume_usage.percent,
-                        "network_infos" : interfaces_infos}
+                        "network_infos" : interfaces_infos,
+                        "network_stats" : network_stats}
             socketio.emit("sys_informations", json.dumps(sys_infos), namespace="/test")
 
         if rtk.sleep_count > rtkcv_standby_delay and rtk.state != "inactive" or \
@@ -546,6 +685,7 @@ def diagnostic():
         logs.append({'name' : service['service_unit'], 'active' : active_state, 'sysctl_status' : sysctl_status, 'journalctl' : journalctl})
         
     return render_template('diagnostic.html', logs = logs)
+
 
 
 @app.route('/api/v1/infos', methods=['GET'])
