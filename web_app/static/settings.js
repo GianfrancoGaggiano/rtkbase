@@ -599,6 +599,48 @@ $(document).ready(function () {
 
         var networkElt = document.getElementById("network_infos");
         networkElt.innerHTML = createNetworkInterfacesList(sysInfos["network_infos"]);
+
+        // Update network connectivity statistics
+        if (sysInfos["network_stats"]) {
+            var networkStats = sysInfos["network_stats"];
+            var statusElt = document.getElementById("network_status");
+            var latencyElt = document.getElementById("network_latency");
+            var latencyRangeElt = document.getElementById("network_latency_range");
+            var disconnectionsElt = document.getElementById("network_disconnections");
+
+            // Update status
+            if (networkStats.connected) {
+                statusElt.textContent = "Connected";
+                statusElt.className = "badge badge-success";
+            } else {
+                statusElt.textContent = "Disconnected";
+                statusElt.className = "badge badge-danger";
+            }
+
+            // Update latency
+            if (networkStats.latency !== null) {
+                latencyElt.textContent = networkStats.latency;
+                latencyElt.style.color = networkStats.latency > 100 ? "red" : (networkStats.latency > 50 ? "orange" : "#212529");
+            } else {
+                latencyElt.textContent = "-";
+                latencyElt.style.color = "#212529";
+            }
+
+            // Update latency range
+            if (networkStats.latency_min !== null && networkStats.latency_max !== null) {
+                latencyRangeElt.textContent = networkStats.latency_min + " / " + networkStats.latency_max;
+            } else {
+                latencyRangeElt.textContent = "- / -";
+            }
+
+            // Update disconnections
+            disconnectionsElt.textContent = networkStats.disconnections;
+            if (networkStats.disconnections > 0) {
+                disconnectionsElt.style.color = "red";
+            } else {
+                disconnectionsElt.style.color = "#212529";
+            }
+        }
     })
 
     function createNetworkInterfacesList(interfaces) {
